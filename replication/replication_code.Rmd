@@ -1,0 +1,241 @@
+---
+title: "Replication Project"
+author: "Xavier Adomatis"
+date: '2022-05-02'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+# Load necessary packages
+library(haven)
+library(dplyr)
+library(fastDummies)
+library(miceadds)
+library(purrr)
+library(openxlsx)
+# Read in data
+df <- read_dta("master.dta")
+```
+# Variable Prep
+```{r}
+# Get year dummies, as the stata naming for these variables is incompatible with R
+df <- dummy_cols(df, select_columns = 'year') #,remove_first_dummy = TRUE
+```
+
+# Recreation of Table 2
+
+## Build a function to determine the output of the result combinations
+```{r}
+# Initiate a function with no additional covariates
+reg_func <- function(miles,panel,parity) {
+  # Limit the dataframe to only include those within a specified distance
+  df_lim <- df[abs(df$y) < miles,]
+  
+  # For Panel A results, ensure that variables reference all mortgages
+  if(panel=="A") {var <- df_lim$d90plus_lpsquery; fico <- df_lim$fico_orig; n_loans <- df_lim$Nloans_lpsquery; Mortgages <- "All"}
+  
+  # For Panel B results, ensure that results are limited to nonprime mortgage metrics
+  if(panel=="B") {var <- df_lim$d90plus_absquery; fico <- df_lim$fico_orig_absquery; n_loans <- df_lim$Nloans_absquery; Mortgages <- "Nonprime"}
+  
+  # For odd numbered regressions include only year effects
+  if(parity=="odd") {reg <- lm.cluster(var ~ texas + y 
+                                       + year_2008 + year_2009 + year_2010 + year_2011, 
+                                       data = df_lim, weights=(n_loans), 
+                                       cluster = 'countyfips'); Covariates <- "Only Year Effects"}
+  
+  # For even numbered regressions include additional covariates
+  if(parity=="even") {reg <- lm.cluster(var ~ texas + y 
+                                        + ur + impL1D1lnhpi + fico 
+                                        + year_2008 + year_2009 + year_2010 + year_2011, 
+                                        data = df_lim, weights=(n_loans), 
+                                        cluster = 'countyfips'); Covariates <- "Covariates"}
+  
+  # Ensure ouputs are captured for each regression
+  Texas <- round(summary(reg)[2,1],3)
+  SE <- round(summary(reg)[2,2],3)
+  N_Observations <- length(df_lim$countyfips)
+  N_Counties <- length(unique(df_lim$countyfips))
+  R_sqd <- round(summary(reg$lm_res)$r.squared,3)
+  
+  # Ensure identifying info is included with the output
+  Miles_from_Border <- miles
+  
+  # Build a dataframe row (include r when solved)
+  coef_se <- data.frame(Texas,SE,N_Observations,N_Counties,R_sqd,Miles_from_Border,Covariates,Mortgages)
+  
+  # Return a dataframe row containing the relevant information
+  return(coef_se)
+}
+```
+
+### Run as a test
+Results should yield an estimate of -2.594 and an SE of 1.567 for Regression 1.A, and they do.
+```{r}
+# Test run
+reg_func(25,"A","odd")
+```
+## Create the results table
+
+### Build a dataframe of input combinations
+```{r}
+# Set list of possible distances
+distances <- rep(c(25,50,75,100,1000),each=2,times=2)
+# Set list of Panel names
+panels <- rep(c("A","B"),each=10)
+# Alternate even and odd regressions
+parities <- rep(c("odd","even"),times=10)
+# Merge into a data frame of all possible input combinations
+inputs <- data.frame(distances,panels,parities)
+```
+
+### Construct a table of results
+```{r}
+# Apply the function to row 1 to begin our output table
+appended <- reg_func(inputs$distances[1],inputs$panels[1],inputs$parities[1])
+# Remove the already-processed row from the sample
+inputs <- inputs %>% slice(-1)
+# Iterate over the inputs dataframe to create the results output
+for (i in 1:19){
+appended[i+1,] <- reg_func(inputs$distances[i],inputs$panels[i],inputs$parities[i])
+}
+```
+
+### Organize the data into table format
+```{r}
+# Repair NAs caused by defualt settings
+appended$Covariates <- as.character(appended$Covariates)
+appended$Covariates[is.na(appended$Covariates)] <- "Covariates"
+appended$Mortgages <- as.character(appended$Mortgages)
+appended$Mortgages[is.na(appended$Mortgages)] <- "Nonprime"
+
+# Change column orders to match the tables
+appended <- appended %>%
+  select(Miles_from_Border, Covariates, Mortgages, everything())
+
+# Produce the panels by transposing the data
+Panel_A <- data.frame(t(appended[appended$Mortgages == "All",]))
+Panel_B <- data.frame(t(appended[appended$Mortgages != "All",]))
+
+# Write to Excel for easy pasting
+write.xlsx(Panel_A, "T2_Panel_A.xlsx")
+write.xlsx(Panel_B, "T2_Panel_B.xlsx")
+```
+
+# Recreation of Figure 3
+
+## Build a function to output the appropriate plots
+```{r}
+plotter <- function(title,miles) {
+  # Limit the dataset to the preset distance
+  df_lim <- df %>% filter(abs(y) < miles)
+  # Aggregate means
+  agg_def <- aggregate(df_lim$d90plus_absquery, list(df_lim$y), FUN=mean)
+  # Create color variants for both sides fo the border
+  agg_def$Texas <- ifelse(agg_def$Group.1 < 0, "darkslategray2", "firebrick3")
+  # Split the data for abline purposes
+  neg = df_lim[df_lim$y > 0, ]
+  pos = df_lim[df_lim$y < 0, ]
+  
+  # Create primary scatterplot
+  plot(agg_def$Group.1, agg_def$x, type = "p", col = agg_def$Texas, pch = 16, xlab = "Distance from Border", ylab = "Mortgage Defaulr Rate", main = title)
+  # Add threshold line
+  abline(v=0, col="gray", lty = 2, lwd = 2)
+  # Cut regression lines above and below the thresholds
+  clip(0, 100, 5, 25)
+  abline(lm.cluster(d90plus_absquery ~ y, data = neg, weights=(neg$Nloans_abss), cluster = 'countyfips'), col = "firebrick3", lwd = 5)
+  grid(nx = NA,ny = NULL,lty = 2, col = "gray", lwd = 2)
+  clip(-100, 0, 5, 25)
+  abline(lm.cluster(d90plus_absquery ~ y, data = pos, weights=(pos$Nloans_abss), cluster = 'countyfips'), col = "darkslategray2", lwd = 5)
+  grid(nx = NA,ny = NULL,lty = 2, col = "gray", lwd = 2)
+}
+```
+
+## Produce the resulting plots
+```{r}
+#Produce plots
+plotter("Panel A. Within 25 Miles",25)
+plotter("Panel B. Within 50 Miles",50)
+plotter("Panel C. Within 75 Miles",75)
+plotter("Panel D. Within 100 Miles",100)
+```
+
+
+# Additions to the paper
+
+## Conduct a permutation test
+```{r}
+# Set baseline regression to see the resulting coefficients and assess significance
+ptest.lm = lm(d90plus_absquery ~ texas, data = df, weights=df$Nloans_abss)
+summary(ptest.lm)
+
+# Preset repretitions at 500
+reps = 500
+
+# Create matrix to hold results
+cm = matrix(NA, reps, 1)
+
+# Rerun the regression while randomizing the treatment variable
+for(ii in 1:reps) {
+  # Randomize whether or not the observation is in Texas
+  df$texas = sample(c(0,1), dim(df)[1], replace = TRUE) 
+  # Set the Regression
+  ptest.lm = lm(d90plus_absquery ~ texas + y + ur + impL1D1lnhpi + fico_orig_absquery + year_2008 + year_2009 + year_2010 + year_2011, data = df, weights=df$Nloans_abss) 
+  # Record results
+  cm[ii,1]=coefficients(ptest.lm)[2]
+}
+# Plot
+hist(cm[,1],breaks=20,main="Permutation Test",xlab="Permutation Estimate")
+abline(v=0, col="black")
+```
+
+## Test the permutation test across all possible bandwidths
+```{r}
+# Preset repetitions at 100 to preserve computing power
+reps = 100
+# Enumerate bandwidths
+bwidths = seq(from=0, to=400, by=5)
+# Set a matrix all possible distance bounds
+CoefMatrix  = matrix(NA, length(bwidths), 5)
+
+# Conduct the permutation test across all bandwidths
+for(ii in 1:length(bwidths)) {
+  dta <- df[abs(df$y) < bwidths[ii],]
+  # Create matrix to hold results
+  cm = matrix(NA, reps, 1)
+  # Rerun the regression while randomizing the treatment variable
+  for(v in 1:reps) {
+    # Randomize whether or not the observation is in Texas
+    df$texas = sample(c(0,1), dim(df)[1], replace = TRUE)
+    # Set the Regression
+    ptest.lm = lm(d90plus_absquery ~ texas+ y + ur + impL1D1lnhpi + fico_orig_absquery + year_2008 + year_2009 + year_2010 + year_2011, data = df, weights=df$Nloans_abss)
+    # Record results
+    cm[v,1]=coefficients(ptest.lm)[2]
+  }
+  # Load the aggregate results of each permutation into a larger matrix
+  # Record basic outputs from each result
+  CoefMatrix[ii,1]=bwidths[ii]
+  CoefMatrix[ii,2]= median(cm)
+  CoefMatrix[ii,3]= sd(cm)
+  # Set bounds at 95% confidence levels
+  CoefMatrix[ii,4]= CoefMatrix[ii,2] - 2*CoefMatrix[ii,3]
+  CoefMatrix[ii,5]= CoefMatrix[ii,2] + 2*CoefMatrix[ii,3]
+}
+
+# Plot
+plot(
+  CoefMatrix[,1],
+  CoefMatrix[,2],
+  type="b",
+  col="blue",
+  xlab="Bandwidth",
+  ylab="Estimate with Randomized Independent Variable",
+  main="Permutation Variance by Bandwidth",ylim=c(-2,2))
+
+lines(CoefMatrix[,1],CoefMatrix[,4],type="l",col="red")
+lines(CoefMatrix[,1],CoefMatrix[,5],type="l",col="red")
+
+abline(h=0)
+
+```

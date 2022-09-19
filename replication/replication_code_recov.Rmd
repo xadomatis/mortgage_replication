@@ -1,0 +1,73 @@
+---
+title: "Replication Project"
+author: "Xavier Adomatis"
+date: '2022-05-02'
+output: html_document
+---
+
+```{r}
+library(haven)
+library(dplyr)
+library(fastDummies)
+library(miceadds)
+#read in data
+df <- read_dta("master.dta")
+```
+# Variable Prep
+```{r}
+#establish bin variables for different distances
+df$wn_25 <- ifelse(abs(df$y) <25, 1, 0)
+df$wn_50 <- ifelse(abs(df$y) <50, 1, 0)
+df$wn_75 <- ifelse(abs(df$y) <75, 1, 0)
+df$wn_100 <- ifelse(abs(df$y) <100, 1, 0)
+#get year dummies
+df <- dummy_cols(df, select_columns = 'year') #,remove_first_dummy = TRUE
+```
+
+# Recreation of Table 2
+
+## Build a function to determine the output of the result combinations
+```{r}
+#initiate a function with no additional covariates
+reg_func <- function(miles,panel,parity) {
+#limit the dataframe to only include those within a distance
+df_lim <- df %>% filter(abs(y) < miles)
+#set parameters for conditionals
+if(panel=="A") {var <- df_lim$d90plus_lpsquery; fico <- df_lim$fico_orig; n_loans <- df_lim$Nloans_lpsquery; dv <- "all"}
+if(panel=="B") {var <- df_lim$d90plus_absquery; fico <- df_lim$fico_orig_absquery; n_loans <- df_lim$Nloans_abss; dv <- "nonprime"}
+if(parity=="odd") {reg <- lm.cluster(var ~ texas + y + year_2008 + year_2009 + year_2010 + year_2011, data = df_lim, weights=(n_loans), cluster = 'countyfips'); cvs <- "none"}
+if(parity=="even") {reg <- lm.cluster(var ~ texas + y + ur + impL1D1lnhpi + fico + year_2008 + year_2009 + year_2010 + year_2011, data = df_lim, weights=(n_loans), cluster = 'countyfips'); cvs <- "all"}
+#isolate the coefficient and standard error of interest
+tex_est <- round(summary(reg)[2,1],3)
+tex_se <- round(summary(reg)[2,2],3)
+#ensure identifying info is included with the output
+dist_lim <- miles
+obs <- length(df_lim$countyfips)
+n_counties <- length(unique(df_lim$countyfips))
+r <- round(summary(reg$lm_res)$r.squared,3)
+#build a dataframe row (include r when solved)
+coef_se <- data.frame(tex_est,tex_se,obs,n_counties,r,dist_lim,cvs,dv)
+return(coef_se)
+}
+```
+
+Run as a test; results should issue an estimate of -2.594 and an SE of 1.567
+```{r}
+#test run
+reg_func(25,"A","odd")
+```
+
+```{r}
+#construct a dataframe to output the desired table
+distances <- rep(c(25,50,75,100,1000),each=2,times=2)
+panels <- rep(c("A","B"),each=10)
+parities <- rep(c("odd","even"),times=10)
+inputs <- data.frame(distances,panels,parities)
+#seperate out the first row to build a dataframe
+appended <- reg_func(inputs$distances[1],inputs$panels[1],inputs$parities[1])
+inputs <- inputs %>% slice(-1)
+#run a loop over the dataframe
+for (i in range(19)){
+appeded[i+1,] <- reg_func(inputs$distances[i],inputs$panels[i],inputs$parities[i])
+}
+```
